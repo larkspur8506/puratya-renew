@@ -178,22 +178,81 @@ def _set_cookie_blob(resp) -> str:
     return raw
 
 
+def _code_from_success_url(url: str) -> str:
+    """从 `https://cloud.m-ws.cc/auth/success?code=...` 里抠出 code。
+
+    只认 /auth/success 这条路径 —— 后端 callback 上的 code 是另一回事，
+    不能混用（那是 OAuth code，已被后端消费掉）。
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return ""
+    if not parsed.path.rstrip("/").endswith("/auth/success"):
+        return ""
+    qs = urllib.parse.parse_qs(parsed.query)
+    return (qs.get("code") or [""])[0]
+
+
+def _exchange_code(sess: requests.Session, code: str) -> str:
+    """MWS 新流程（2026-10 起）：回调只给一个短命 code，
+    前端再用它 POST /api/auth/exchange 换 __Host-mrtcloud_token Cookie。
+    """
+    resp = sess.post(
+        FRONTEND + "/api/auth/exchange",
+        json={"code": code},
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Origin": FRONTEND,
+            "Referer": FRONTEND + "/auth/success",
+        },
+        timeout=30,
+    )
+    token = _token_from_cookies(sess.cookies) or extract_mws_token(_set_cookie_blob(resp))
+    if token:
+        return token
+    # 有的实现在响应体里直接回 token
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    for container in (data, (data or {}).get("data") if isinstance(data, dict) else None):
+        if isinstance(container, dict):
+            for key in ("token", "access_token", "jwt", "mrtcloud_token"):
+                val = container.get(key)
+                if isinstance(val, str) and val:
+                    return val
+    print("[!] /api/auth/exchange 未返回 token（HTTP {}）".format(getattr(resp, "status_code", "?")))
+    return ""
+
+
 def _finish_callback(sess: requests.Session, location: str) -> str:
-    """打开 Discord 返回的 callback，读取新的 MWS JWT。"""
+    """打开 Discord 返回的 callback，读取新的 MWS JWT。
+
+    两条路径都要兼容：
+      ① 老流程：后端 callback 直接 Set-Cookie __Host-mrtcloud_token；
+      ② 新流程：后端只 302 到前端 /auth/success?code=…，需再 POST /api/auth/exchange。
+    """
     resp = sess.get(location, allow_redirects=False, timeout=30)
     token = _token_from_cookies(sess.cookies) or extract_mws_token(_set_cookie_blob(resp))
+    final_url = resp.headers.get("Location") or ""
+    if not token and final_url:
+        # 再跟一跳（通常是 302 到前端 /auth/success?code=…）
+        nxt = urllib.parse.urljoin(location, final_url)
+        resp2 = sess.get(nxt, allow_redirects=False, timeout=30)
+        token = _token_from_cookies(sess.cookies) or extract_mws_token(_set_cookie_blob(resp2))
+        final_url = resp2.headers.get("Location") or nxt
     if not token:
-        # 再跟一跳（有时先 302 到前端）
-        loc = resp.headers.get("Location") or ""
-        if loc:
-            nxt = urllib.parse.urljoin(location, loc)
-            resp2 = sess.get(nxt, allow_redirects=False, timeout=30)
-            token = _token_from_cookies(sess.cookies) or extract_mws_token(
-                _set_cookie_blob(resp2)
-            )
+        code = _code_from_success_url(final_url) or _code_from_success_url(location)
+        if code:
+            print("[i] MWS 用 code 交换流程：POST /api/auth/exchange")
+            token = _exchange_code(sess, code)
     if not token:
-        loc = resp.headers.get("Location") or ""
-        raise RuntimeError("OAuth 回调没有种下 {}（停留 {}）".format(COOKIE_NAME, loc or resp.status_code))
+        raise RuntimeError("OAuth 回调没有种下 {}（停留 {}）".format(
+            COOKIE_NAME, final_url or resp.status_code))
     return token
 
 
