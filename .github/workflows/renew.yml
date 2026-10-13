@@ -28,7 +28,12 @@ jobs:
           MWS_TOKEN: ${{ secrets.MWS_TOKEN }}
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          # 通知走 notify-gateway，统一发邮件 + Telegram（仓库不内置 SMTP/TG）
+          # 通知：优先直发自己的 Telegram（Bot API）
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_THREAD_ID: ${{ secrets.TG_THREAD_ID }}
+          TG_API_BASE: ${{ secrets.TG_API_BASE }}
+          # 可选回退：原作者的 notify-gateway（不配就不用，两者都没配时只在日志里告警）
           NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
           NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}
           TZ: Asia/Shanghai

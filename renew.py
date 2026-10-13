@@ -120,13 +120,20 @@ def _manual_token_help():
 
 
 def ensure_token():
-    """返回可用的 MWS JWT；必要时用 Discord OAuth 换新并写回 Secrets。"""
+    """返回可用的 MWS JWT；必要时用 Discord OAuth 换新并写回 Secrets。
+
+    重要：换票只是「提前续命」的锦上添花。若换票失败（Discord token 失效等）
+    但手上这枚 JWT 仍能通过 /auth/me，那就**继续用它去续期**，只发一条告警，
+    绝不因为换票失败而中断续期 —— 否则 Bot 会因为没人点 Renew 而被停。
+    只有「手上这枚 JWT 本身已失效（401）/完全没配」时才退出 1。
+    """
     token = os.environ.get("MWS_TOKEN", "").strip()
     dc = discord_token()
     refresh_days = int(os.environ.get("MWS_REFRESH_BEFORE_DAYS", "7") or "7")
     need_refresh = False
     reason = ""
     me_body = ""
+    token_ok = False
 
     if not token:
         need_refresh = True
@@ -140,6 +147,7 @@ def ensure_token():
             print("[✗] 验证 token 异常: HTTP {} {}".format(status, me_body))
             sys.exit(1)
         else:
+            token_ok = True
             left = jwt_seconds_left(token)
             if left is not None and left < refresh_days * 86400:
                 need_refresh = True
@@ -154,9 +162,13 @@ def ensure_token():
     if not dc:
         title = "⚠️ MWS token 需要更新 ({})".format(now_str())
         content = reason + "\n" + _manual_token_help()
+        if token_ok:
+            content += "\n\n本次改用现有 MWS_TOKEN 继续续期（只是少了自动换票）。"
         print(title)
         print(content)
-        _report("failed", title, content, None)
+        _report("failed" if not token_ok else "warning", title, content, None)
+        if token_ok:
+            return token, me_body
         sys.exit(1)
 
     try:
@@ -164,9 +176,13 @@ def ensure_token():
     except Exception as e:
         title = "⚠️ MWS Discord 自动登录失败 ({})".format(now_str())
         content = "{}\n{}\n{}".format(reason, e, _manual_token_help())
+        if token_ok:
+            content += "\n\n本次改用现有 MWS_TOKEN 继续续期（只是少了自动换票）。"
         print(title)
         print(content)
-        _report("failed", title, content, None)
+        _report("failed" if not token_ok else "warning", title, content, None)
+        if token_ok:
+            return token, me_body
         sys.exit(1)
 
     wrote = persist_mws_token(token)
