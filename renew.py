@@ -102,9 +102,11 @@ def renew_one(token, kind, oid):
 
 
 def _report(level, title, content, details):
-    """上报 notify-gateway；失败只打日志，不阻断续期主流程。"""
+    """上报通知；失败只打日志，不阻断续期主流程。"""
     try:
-        notify(title, content, level=level, details=details)
+        res = notify(title, content, level=level, details=details)
+        via = res.get("via") if isinstance(res, dict) else "?"
+        print("[i] 通知已发送（{}）".format(via))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
         print("::warning::通知上报失败 HTTP {}: {}".format(e.code, body))
