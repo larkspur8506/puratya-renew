@@ -22,7 +22,7 @@ import os
 import sys
 import json
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
@@ -32,7 +32,11 @@ from auth import (
     jwt_seconds_left,
     persist_mws_token,
 )
-from notify import notify
+from notify import notify, notify_text
+
+# 通知抬头（可通过环境变量覆盖，例如 NOTIFY_FLAG=🇫🇮 NOTIFY_SERVICE=Bot-hosting）
+FLAG = os.environ.get("NOTIFY_FLAG", "🇯🇵")
+SERVICE = os.environ.get("NOTIFY_SERVICE", "puratya (MWS)")
 
 # 面板：https://cloud.m-ws.cc ；后端也可以直连 https://cloud-api.m-ws.cc（无 /api 前缀）
 FRONTEND = "https://cloud.m-ws.cc"
@@ -72,13 +76,13 @@ def now_str():
 
 
 def collect(token):
-    """拉取所有 Bot / Site，返回 [(kind, id, name, remaining_hours), ...]。"""
+    """拉取所有 Bot / Site，返回 [(kind, id, name, remaining_hours, expires_at), ...]。"""
     items = []
     for kind, path, key in [("Bot", "/bots", "bots"), ("Site", "/sites", "sites")]:
         status, body = http(path, token=token)
         if status != 200:
             print("[!] 获取 {} 失败: HTTP {} {}".format(path, status, body))
-            items.append((kind, None, "<列表获取失败 HTTP {}>".format(status), None))
+            items.append((kind, None, "<列表获取失败 HTTP {}>".format(status), None, None))
             continue
         try:
             data = json.loads(body)
@@ -90,7 +94,9 @@ def collect(token):
             name = obj.get("name") or obj.get("username") or "id:{}".format(oid)
             timer = obj.get("timer") or {}
             rem = timer.get("remaining_hours")
-            items.append((kind, oid, name, rem))
+            expires = (obj.get("expires_at") or obj.get("expire_at")
+                       or obj.get("expired_at") or timer.get("expires_at"))
+            items.append((kind, oid, name, rem, expires))
     return items
 
 
@@ -162,29 +168,29 @@ def ensure_token():
 
     print("[!] {}".format(reason))
     if not dc:
-        title = "⚠️ MWS token 需要更新 ({})".format(now_str())
-        content = reason + "\n" + _manual_token_help()
+        note = reason + "\n" + _manual_token_help()
         if token_ok:
-            content += "\n\n本次改用现有 MWS_TOKEN 继续续期（只是少了自动换票）。"
-        print(title)
-        print(content)
-        _report("failed" if not token_ok else "warning", title, content, None)
-        if token_ok:
+            text = format_report("⚠️ 换票失败（已用现有 MWS_TOKEN 继续续期）", note=note)
+            print(text)
+            _report_text(text, level="warning")
             return token, me_body
+        text = format_report("❌ 换票失败：MWS_TOKEN 已失效，请手动更新", note=note)
+        print(text)
+        _report_text(text, level="failed")
         sys.exit(1)
 
     try:
         token = discord_relogin(dc)
     except Exception as e:
-        title = "⚠️ MWS Discord 自动登录失败 ({})".format(now_str())
-        content = "{}\n{}\n{}".format(reason, e, _manual_token_help())
+        note = "{}\n{}\n{}".format(reason, e, _manual_token_help())
         if token_ok:
-            content += "\n\n本次改用现有 MWS_TOKEN 继续续期（只是少了自动换票）。"
-        print(title)
-        print(content)
-        _report("failed" if not token_ok else "warning", title, content, None)
-        if token_ok:
+            text = format_report("⚠️ 换票失败（已用现有 MWS_TOKEN 继续续期）", note=note)
+            print(text)
+            _report_text(text, level="warning")
             return token, me_body
+        text = format_report("❌ 换票失败：MWS_TOKEN 已失效，请手动更新", note=note)
+        print(text)
+        _report_text(text, level="failed")
         sys.exit(1)
 
     wrote = persist_mws_token(token)
@@ -201,13 +207,98 @@ def ensure_token():
         sys.exit(1)
 
     extra = "已写回 GitHub Secret" if wrote else "未写回 Secret（缺 GH_TOKEN 或 gh 失败）"
-    _report(
-        "success",
-        "MWS token 已自动更新 ({})".format(now_str()),
-        "{}\n{}".format(reason, extra),
-        None,
-    )
+    text = format_report("✅ 换票成功（新 MWS_TOKEN 已生效）",
+                         note="{}\n{}".format(reason, extra))
+    print(text)
+    _report_text(text, level="success")
     return token, me_body
+
+
+def _parse_expiry(value):
+    """把 expires_at 解析成 datetime（容错：ISO 字符串 / epoch 秒 / epoch 毫秒）。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            ts = float(value)
+            return datetime.fromtimestamp(ts / 1000.0 if ts > 1e11 else ts).astimezone()
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt.astimezone() if dt.tzinfo else dt
+
+
+def _fmt_expiry(expires_at, remaining_hours):
+    """到期日期 YYYY/MM/DD；没有 expires_at 就用「现在 + 剩余小时」推。"""
+    dt = _parse_expiry(expires_at)
+    if dt is None and remaining_hours is not None:
+        try:
+            dt = datetime.now().astimezone() + timedelta(hours=float(remaining_hours))
+        except (TypeError, ValueError):
+            dt = None
+    return dt.strftime("%Y/%m/%d") if dt else "未知"
+
+
+def _fmt_left(remaining_hours):
+    """剩余时间，形如 `23h59min后` / `167h后（约 6天23小时）`。"""
+    if remaining_hours is None:
+        return "未知"
+    try:
+        hours = float(remaining_hours)
+    except (TypeError, ValueError):
+        return "未知"
+    if hours < 48:
+        whole = int(hours)
+        minutes = int(round((hours - whole) * 60))
+        if minutes >= 60:
+            whole, minutes = whole + 1, 0
+        return "{}h{}min后".format(whole, minutes)
+    days = int(hours // 24)
+    rest = int(round(hours - days * 24))
+    return "{:.0f}h后（约 {}天{}小时）".format(hours, days, rest)
+
+
+def format_report(status_line, items=None, note=None, account=None):
+    """按用户指定模板渲染通知：
+
+        🇯🇵 puratya (MWS) 续期通知
+
+        ✅ 续期成功
+        👤 登录账户: ****
+        📅 到期时间: 2026/10/20
+        ⏱️ 可续期时间: 167h后（约 6天23小时）
+        ⏱️ 登录时间: 2026-10-13 21:53:13
+    """
+    lines = ["{} {} 续期通知".format(FLAG, SERVICE), "", status_line]
+    lines.append("👤 登录账户: {}".format(account or "***"))
+    rows = list(items or [])
+    for kind, oid, name, rem, expires in rows:
+        if len(rows) > 1:
+            lines.append("—  {} {}（id:{}）".format(kind, name, oid))
+        lines.append("📅 到期时间: {}".format(_fmt_expiry(expires, rem)))
+        lines.append("⏱️ 可续期时间: {}".format(_fmt_left(rem)))
+    if note:
+        lines.append(note)
+    lines.append("⏱️ 登录时间: {}".format(
+        datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")))
+    return "\n".join(lines)
+
+
+def _report_text(text, level="success"):
+    """发一条「原文」通知（模板文本已经排好版，不再加工）。"""
+    try:
+        res = notify_text(text, level=level)
+        via = res.get("via") if isinstance(res, dict) else "?"
+        print("[i] 通知已发送（{}）".format(via))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        print("::warning::通知上报失败 HTTP {}: {}".format(e.code, body))
+    except Exception as e:
+        print("::warning::通知上报失败: {}".format(e))
 
 
 def main():
@@ -223,50 +314,39 @@ def main():
     # 1) 拉取并续期
     items = collect(token)
     if not items:
-        title = "MWS 续期报告 ({}) · 无对象".format(now_str())
-        print(title)
-        _report("success", title, "账号下没有 Bot / Site，跳过。", None)
+        print("[i] 账号下没有 Bot / Site，跳过。")
+        _report_text(format_report("✅ 续期成功", items=[], account=who,
+                                   note="账号下没有 Bot / Site，无需续期。"))
         return
 
-    lines = []
     failed = 0
-    detail_items = []
-    for kind, oid, name, rem in items:
+    for kind, oid, name, rem, expires in items:
         if oid is None:
-            lines.append("  · {} {}：列表获取失败".format(kind, name))
-            detail_items.append({"id": "unknown", "name": name, "status": "failed",
-                                 "error": "列表获取失败"})
+            print("[✗] {} {}：列表获取失败".format(kind, name))
             failed += 1
             continue
         ok, status, body = renew_one(token, kind, oid)
         rem_txt = "，续期前剩 {}h".format(int(rem)) if rem is not None else ""
         if ok:
-            lines.append("  · {} {}：续期成功{}".format(kind, name, rem_txt))
-            msg = rem_txt.strip().lstrip("，") if rem is not None else ""
-            detail_items.append({"id": str(oid), "name": name, "status": "success",
-                                 "message": msg})
             print("[✓] {} {} (id:{}) 续期成功{}".format(kind, name, oid, rem_txt))
         else:
-            lines.append("  · {} {}：续期失败 HTTP {} {}".format(kind, name, status, body.strip()))
-            detail_items.append({"id": str(oid), "name": name, "status": "failed",
-                                 "error": "HTTP {} {}".format(status, body.strip())})
+            print("[✗] {} {} (id:{}) 续期失败 HTTP {} {}".format(kind, name, oid, status,
+                                                            body.strip()[:200]))
             failed += 1
-            print("[✗] {} {} (id:{}) 续期失败 HTTP {}".format(kind, name, oid, status))
 
-    # 2) 汇总 + 通知
+    # 2) 汇总 + 通知（按用户模板）
     total = len(items)
     success = total - failed
-    level = "success" if failed == 0 else "partial"
-    status_word = "完成" if failed == 0 else "部分失败"
-    title = "MWS 续期报告 ({}) · {}".format(now_str(), status_word)
-    content = "\n".join(lines)
-    print("\n" + title + "\n" + content)
-    _report(
-        level,
-        title,
-        content,
-        {"total": total, "success": success, "failed": failed, "details": detail_items},
-    )
+    if failed == 0:
+        status_line, level = "✅ 续期成功", "success"
+    elif success:
+        status_line, level = "⚠️ 部分成功（{}/{}）".format(success, total), "partial"
+    else:
+        status_line, level = "❌ 续期失败", "failed"
+    text = format_report(status_line, items=items, account=who,
+                         note=None if failed == 0 else "详情见 Actions 运行日志。")
+    print("\n" + text)
+    _report_text(text, level=level)
     if failed:
         sys.exit(1)
 

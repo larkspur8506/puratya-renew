@@ -128,8 +128,23 @@ def send_gateway(title, content, level, details, source):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def notify_text(text, level="info", source="puratya-renew"):
+    """发一条**已经排好版**的原文（不再加 emoji 抬头/汇总行）。
+
+    续期报告用这个：模板文本由 renew.format_report() 生成。
+    """
+    if TG_BOT_TOKEN and TG_CHAT_ID:
+        return {"via": "telegram", "result": send_telegram(text)}
+    if NOTIFY_URL:
+        head, _, rest = text.partition("\n\n")
+        return {"via": "gateway",
+                "result": send_gateway(head, rest or text, level, None, source)}
+    raise RuntimeError("未配置通知通道：需要 TG_BOT_TOKEN + TG_CHAT_ID"
+                       "（或回退用 NOTIFY_URL + NOTIFY_TOKEN）")
+
+
 def notify(title, content="", level="success", details=None, source="puratya-renew"):
-    """发通知。返回 {"via": "telegram"|"gateway", "result": ...}。"""
+    """发通知（通用形态：自动加 emoji 抬头 + 汇总行）。返回 {"via": ..., "result": ...}。"""
     if TG_BOT_TOKEN and TG_CHAT_ID:
         return {"via": "telegram",
                 "result": send_telegram(render_text(title, content, level, details))}
