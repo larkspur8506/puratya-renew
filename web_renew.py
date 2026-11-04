@@ -21,27 +21,35 @@ COOKIE_NAME = "__Host-mrtcloud_token"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 
-CLICK_JS = """(botName) => {
-  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-  const btns = [...document.querySelectorAll('button, a')].filter(
-    (b) => norm(b.textContent) === '延長' || norm(b.getAttribute('title')) === 'タイマーをリセット（7日延長）'
-  );
-  if (!btns.length) return {ok: false, why: 'no-button', seen: [...document.querySelectorAll('button')].map(b => norm(b.textContent)).slice(0, 20)};
-  let target = btns[0];
-  if (botName) {
-    const hit = btns.find((b) => {
-      let n = b;
-      for (let i = 0; i < 6 && n; i++, n = n.parentElement) {
-        if ((n.textContent || '').includes(botName)) return true;
-      }
-      return false;
-    });
-    if (hit) target = hit;
-  }
-  target.scrollIntoView({block: 'center'});
-  target.click();
-  return {ok: true, count: btns.length};
-}"""
+CLICK_JS = """
+var botName = (arguments[0] || '');
+var norm = function (s) { return (s || '').replace(/\\s+/g, ' ').trim(); };
+var all = [].slice.call(document.querySelectorAll('button, a'));
+var btns = all.filter(function (b) {
+  return norm(b.textContent) === '\u5ef6\u9577' ||
+         norm(b.getAttribute('title')) === '\u30bf\u30a4\u30de\u30fc\u3092\u30ea\u30bb\u30c3\u30c8\uff087\u65e5\u5ef6\u9577\uff09';
+});
+if (!btns.length) {
+  return {ok: false, why: 'no-button',
+          seen: all.filter(function (b) { return norm(b.textContent).length; })
+                    .map(function (b) { return norm(b.textContent).slice(0, 20); }).slice(0, 25),
+          url: location.href, body: norm(document.body.innerText).slice(0, 200)};
+}
+var target = btns[0];
+if (botName) {
+  var hit = btns.filter(function (b) {
+    var n = b;
+    for (var i = 0; i < 6 && n; i++, n = n.parentElement) {
+      if ((n.textContent || '').indexOf(botName) >= 0) return true;
+    }
+    return false;
+  })[0];
+  if (hit) target = hit;
+}
+target.scrollIntoView({block: 'center'});
+target.click();
+return {ok: true, count: btns.length};
+"""
 
 
 def _p(*a):
@@ -80,13 +88,24 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=True, b
     with SB(uc=True, headless=headless, proxy=proxy, locale_code="ja",
             ad_block_on=False, test=False) as sb:
         sb.uc_open_with_reconnect(FRONTEND + "/dashboard", reconnect_time=4)
+        set_ok = False
         try:
-            sb.add_cookie({
-                "name": COOKIE_NAME, "value": token, "domain": "cloud.m-ws.cc",
+            sb.driver.execute_cdp_cmd("Network.setCookie", {
+                "name": COOKIE_NAME, "value": token, "url": FRONTEND + "/",
                 "path": "/", "secure": True, "httpOnly": True, "sameSite": "Lax",
             })
+            set_ok = True
+            _p("[i] cookie 已通过 CDP 写入")
         except Exception as e:  # noqa: BLE001
-            _p("[!] 写 cookie 失败（继续尝试）:", str(e)[:120])
+            _p("[!] CDP 写 cookie 失败:", str(e)[:160])
+        if not set_ok:
+            try:
+                sb.add_cookie({
+                    "name": COOKIE_NAME, "value": token, "url": FRONTEND + "/",
+                    "path": "/", "secure": True, "httpOnly": True, "sameSite": "Lax",
+                })
+            except Exception as e:  # noqa: BLE001
+                _p("[!] add_cookie 也失败:", str(e)[:160])
         sb.uc_open_with_reconnect(FRONTEND + "/dashboard", reconnect_time=5)
         _p("[i] 已打开面板:", sb.get_current_url())
 
@@ -95,6 +114,17 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=True, b
         if not clicked or not clicked.get("ok"):
             sb.save_screenshot("web-renew-no-button.png")
             return {bid: (False, "找不到「延長」按钮: {}".format(clicked)) for bid in bot_ids}
+
+        time.sleep(6)
+        try:
+            sb.save_screenshot("web-renew-after-click.png")
+            frames = sb.execute_script(
+                "return [].slice.call(document.querySelectorAll('iframe'))"
+                ".map(function (f) { return f.src || ''; })"
+                ".filter(function (s) { return s.indexOf('challenges.cloudflare.com') >= 0; }).length;")
+            _p("[i] 页面上 Turnstile iframe 数:", frames)
+        except Exception as e:  # noqa: BLE001
+            _p("[!] 诊断失败:", str(e)[:120])
 
         deadline = time.time() + timeout
         last = dict(before)
