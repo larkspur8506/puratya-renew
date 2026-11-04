@@ -38,6 +38,10 @@ from notify import notify, notify_text
 FLAG = os.environ.get("NOTIFY_FLAG", "🇯🇵")
 SERVICE = os.environ.get("NOTIFY_SERVICE", "puratya (MWS)")
 
+# 续期接口被 Turnstile 拦住后，剩余多少小时以内才发「需要手动延期」提醒（默认 96h = 4 天）
+REMIND_HOURS = float(os.environ.get("MWS_REMIND_HOURS") or 96)
+
+
 # 面板：https://cloud.m-ws.cc ；后端也可以直连 https://cloud-api.m-ws.cc（无 /api 前缀）
 FRONTEND = "https://cloud.m-ws.cc"
 API = os.environ.get("MWS_API", FRONTEND + "/api").rstrip("/")
@@ -105,6 +109,12 @@ def renew_one(token, kind, oid):
     path = "/bots/{}/renew".format(oid) if kind == "Bot" else "/sites/{}/renew".format(oid)
     status, body = http(path, method="POST", token=token)
     return (status == 200), status, body
+
+
+def needs_human(status, body):
+    """MWS 2026-11 起给续期接口加了 Cloudflare Turnstile：纯 API 一律 403 captcha_required。"""
+    return status == 403 and "captcha_required" in (body or "")
+
 
 
 def _report(level, title, content, details):
@@ -320,6 +330,7 @@ def main():
         return
 
     failed = 0
+    manual = []
     for kind, oid, name, rem, expires in items:
         if oid is None:
             print("[✗] {} {}：列表获取失败".format(kind, name))
@@ -329,6 +340,9 @@ def main():
         rem_txt = "，续期前剩 {}h".format(int(rem)) if rem is not None else ""
         if ok:
             print("[✓] {} {} (id:{}) 续期成功{}".format(kind, name, oid, rem_txt))
+        elif needs_human(status, body):
+            print("[i] {} {} (id:{}) 需要手动延期（页面验证），{}".format(kind, name, oid, rem_txt.lstrip("，")))
+            manual.append((kind, oid, name, rem, expires))
         else:
             print("[✗] {} {} (id:{}) 续期失败 HTTP {} {}".format(kind, name, oid, status,
                                                             body.strip()[:200]))
@@ -336,7 +350,22 @@ def main():
 
     # 2) 汇总 + 通知（按用户模板）
     total = len(items)
-    success = total - failed
+    success = total - failed - len(manual)
+    if manual and not failed:
+        # 只在快到期时才打扰：剩余时间小于阈值（默认 96h）就发提醒
+        lefts = [float(r) for _, _, _, r, _ in manual if r is not None]
+        left = min(lefts) if lefts else None
+        if left is not None and left > REMIND_HOURS:
+            print("[i] 需手动延期，但还剩 {:.0f}h（> {}h），本轮不打扰。".format(left, REMIND_HOURS))
+            return
+        text = format_report(
+            "⏰ 需要手动延期（MWS 加了页面验证）", items=manual, account=who,
+            note="🔗 面板延期: {}/dashboard\n（脚本无法自动续期，点一次「延長」即可）".format(FRONTEND),
+        )
+        print("\n" + text)
+        _report_text(text, level="partial")
+        return
+
     if failed == 0:
         status_line, level = "✅ 续期成功", "success"
     elif success:

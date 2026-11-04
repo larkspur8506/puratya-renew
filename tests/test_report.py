@@ -69,3 +69,26 @@ class FormatReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CaptchaBranchTests(unittest.TestCase):
+    """MWS 2026-11 加了 Cloudflare Turnstile：403 captcha_required 应走人工提醒分支。"""
+
+    def test_detects_captcha_required(self):
+        self.assertTrue(renew.needs_human(
+            403, '{"code":"captcha_required","detail":"延長には画面での確認が必要です。"}'))
+
+    def test_other_403_is_not_captcha(self):
+        self.assertFalse(renew.needs_human(403, '{"detail":"forbidden"}'))
+
+    def test_other_status_is_not_captcha(self):
+        self.assertFalse(renew.needs_human(401, '{"code":"captcha_required"}'))
+
+    def test_manual_reminder_renders_link(self):
+        text = renew.format_report(
+            "⏰ 需要手动延期（MWS 加了页面验证）",
+            items=[("Bot", 11973, "larkspur", 60, None)], account="larkspur8506",
+            note="🔗 面板延期: https://cloud.m-ws.cc/dashboard")
+        self.assertIn("⏰ 需要手动延期", text)
+        self.assertIn("https://cloud.m-ws.cc/dashboard", text)
+        self.assertIn("60h", text)
