@@ -58,8 +58,11 @@ def _remaining(token, bot_id, proxy=None):
         r = requests.get(API + "/bots", headers=headers, proxies=proxies, timeout=30)
         if r.status_code != 200:
             return None
-        for obj in (r.json() or []):
-            if str(obj.get("id")) == str(bot_id):
+        data = r.json() or []
+        # /api/bots 可能返回 [..] 或 {"bots": [..]}，两种都兼容
+        lst = data if isinstance(data, list) else (data.get("bots") or [])
+        for obj in lst:
+            if isinstance(obj, dict) and str(obj.get("id")) == str(bot_id):
                 return (obj.get("timer") or {}).get("remaining_hours")
     except (requests.RequestException, ValueError):
         return None
