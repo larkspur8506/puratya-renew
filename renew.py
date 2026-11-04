@@ -352,7 +352,42 @@ def main():
     total = len(items)
     success = total - failed - len(manual)
     if manual and not failed:
-        # 只在快到期时才打扰：剩余时间小于阈值（默认 96h）就发提醒
+        # 2a) 配了 NODE_LINK 就先走浏览器 + 代理点「延長」（过 Turnstile）
+        node_link = (os.environ.get("NODE_LINK") or "").strip()
+        if node_link and os.environ.get("MWS_WEB_RENEW", "1") != "0":
+            try:
+                from singbox import start_singbox
+                from web_renew import renew_bots_via_web
+
+                proxy = start_singbox(node_link)
+                ids = [oid for _, oid, _, _, _ in manual]
+                headless = os.environ.get("MWS_HEADLESS", "0") != "0"
+                res = renew_bots_via_web(
+                    token, ids, proxy=proxy, headless=headless,
+                    timeout=int(os.environ.get("MWS_WEB_TIMEOUT") or 180),
+                    bot_name=manual[0][2] if len(manual) == 1 else None,
+                )
+                done = []
+                for kind, oid, name, rem, expires in manual:
+                    ok, detail = res.get(oid, (False, "无结果"))
+                    if ok:
+                        print("[✓] {} {} (id:{}) 网页续期成功（{}）".format(kind, name, oid, detail))
+                        done.append(oid)
+                    else:
+                        print("[✗] {} {} (id:{}) 网页续期失败：{}".format(kind, name, oid, detail))
+                if done:
+                    manual = [m for m in manual if m[1] not in done]
+                    success += len(done)
+            except Exception as e:  # noqa: BLE001
+                print("::warning::网页续期异常: {}".format(str(e)[:300]))
+
+        if not manual:
+            text = format_report("✅ 续期成功（网页自动点延长）", items=items, account=who)
+            print("\n" + text)
+            _report_text(text, level="success")
+            return
+
+        # 2b) 浏览器也没过 → 只在快到期时才打扰：剩余时间小于阈值（默认 96h）就发提醒
         lefts = [float(r) for _, _, _, r, _ in manual if r is not None]
         left = min(lefts) if lefts else None
         if left is not None and left > REMIND_HOURS:
