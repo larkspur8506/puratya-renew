@@ -40,6 +40,8 @@ JS_RENDER = """async (sitekey) => {
     document.head.appendChild(s);
   });
   await load();
+  for (let i = 0; i < 60 && !window.turnstile; i++) await new Promise(r => setTimeout(r, 250));
+  if (!window.turnstile) return {state: 'script-missing'};
   window.__tsState = 'rendering';
   return await new Promise((resolve) => {
     const box = document.createElement('div');
@@ -113,7 +115,7 @@ def main():
         }])
         page = ctx.new_page()
         log("[i] 打开面板首页…")
-        page.goto(FRONTEND + "/", wait_until="domcontentloaded", timeout=60000)
+        page.goto(FRONTEND + "/dashboard", wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
         log("[i] url:", page.url, "| title:", page.title()[:60])
 
