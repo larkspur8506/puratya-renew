@@ -44,6 +44,10 @@ CLICK_JS = """(botName) => {
 }"""
 
 
+def _p(*a):
+    print(*a, flush=True)
+
+
 def _remaining(token, bot_id, proxy=None):
     """读 /api/bots，返回该 bot 的 timer.remaining_hours（拿不到返回 None）。"""
     headers = {"User-Agent": UA, "Accept": "application/json",
@@ -67,7 +71,7 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=True, b
     from seleniumbase import SB
 
     before = {bid: _remaining(token, bid, proxy) for bid in bot_ids}
-    print("[i] 续期前剩余: {}".format(before))
+    _p("[i] 续期前剩余: {}".format(before))
     result = {bid: (False, "未尝试") for bid in bot_ids}
 
     with SB(uc=True, headless=headless, proxy=proxy, locale_code="ja",
@@ -79,12 +83,12 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=True, b
                 "path": "/", "secure": True, "httpOnly": True, "sameSite": "Lax",
             })
         except Exception as e:  # noqa: BLE001
-            print("[!] 写 cookie 失败（继续尝试）:", str(e)[:120])
+            _p("[!] 写 cookie 失败（继续尝试）:", str(e)[:120])
         sb.uc_open_with_reconnect(FRONTEND + "/dashboard", reconnect_time=5)
-        print("[i] 已打开面板:", sb.get_current_url())
+        _p("[i] 已打开面板:", sb.get_current_url())
 
         clicked = sb.execute_script(CLICK_JS, bot_name or "")
-        print("[i] 点击「延長」:", clicked)
+        _p("[i] 点击「延長」:", clicked)
         if not clicked or not clicked.get("ok"):
             sb.save_screenshot("web-renew-no-button.png")
             return {bid: (False, "找不到「延長」按钮: {}".format(clicked)) for bid in bot_ids}
@@ -102,5 +106,5 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=True, b
                 break
             last = cur
         sb.save_screenshot("web-renew-final.png")
-        print("[i] 续期后剩余: {}".format(last))
+        _p("[i] 续期后剩余: {}".format(last))
     return result

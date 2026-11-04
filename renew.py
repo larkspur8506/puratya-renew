@@ -379,7 +379,9 @@ def main():
                     manual = [m for m in manual if m[1] not in done]
                     success += len(done)
             except Exception as e:  # noqa: BLE001
+                import traceback
                 print("::warning::网页续期异常: {}".format(str(e)[:300]))
+                traceback.print_exc()
 
         if not manual:
             text = format_report("✅ 续期成功（网页自动点延长）", items=items, account=who)
