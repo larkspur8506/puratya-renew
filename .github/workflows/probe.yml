@@ -29,7 +29,7 @@ jobs:
           MWS_BOT_ID: '11973'
           PROBE_HEADLESS: '0'
           TZ: Asia/Shanghai
-        run: xvfb-run -a python3 captcha_probe.py
+        run: xvfb-run -a python3 captcha_probe_ui.py
 
       - name: 📷 上传截图
         if: always()
