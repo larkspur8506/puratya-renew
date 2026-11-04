@@ -151,7 +151,7 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=False, 
         sb.uc_open_with_reconnect(FRONTEND + "/", reconnect_time=3)
         _p("[i] 当前页:", sb.get_current_url())
 
-        me = sb.execute_async_script(JS_ME)
+        me = sb.driver.execute_async_script(JS_ME)
         sitekey = ""
         if isinstance(me, dict) and isinstance(me.get("body"), dict):
             sitekey = me["body"].get("turnstile_site_key") or ""
@@ -164,7 +164,7 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=False, 
             sb.save_screenshot("web-renew-no-sitekey.png")
             return {bid: (False, "拿不到 turnstile_site_key") for bid in bot_ids}
 
-        ts = sb.execute_async_script(JS_RENDER, sitekey)
+        ts = sb.driver.execute_async_script(JS_RENDER, sitekey)
         _p("[i] Turnstile 渲染结果:", ts)
         if not (isinstance(ts, dict) and ts.get("ok")):
             _try_click_captcha(sb)
@@ -182,7 +182,7 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=False, 
 
         done = []
         for bid in bot_ids:
-            out = sb.execute_async_script(JS_RENEW, bid, tok)
+            out = sb.driver.execute_async_script(JS_RENEW, bid, tok)
             _p("[i] renew id={} -> {}".format(bid, out))
             if isinstance(out, dict) and out.get("status") == 200:
                 done.append(bid)
