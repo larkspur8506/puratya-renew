@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Turnstile 探针：真实 Chromium + 已登录 cookie，尝试免费拿到续期用 turnstile_token。
+"""Turnstile 探针 v2：patchright（去 CDP 指纹）+ 真实 Chrome，尝试免费拿续期用 turnstile_token。"""
 
-用法（GitHub Actions 里跑）：MWS_TOKEN=... MWS_BOT_ID=11973 python3 captcha_probe.py
-只做诊断，不写回 secret；成功时会调用一次 /renew（顺带把倒计时续上）。
-"""
-
-import json
 import os
-import re
 import sys
 import time
 
-from playwright.sync_api import sync_playwright
+try:
+    from patchright.sync_api import sync_playwright  # 更强的反检测分支
+    ENGINE = "patchright"
+except Exception:  # noqa: BLE001
+    from playwright.sync_api import sync_playwright
+    ENGINE = "playwright"
 
 FRONTEND = "https://cloud.m-ws.cc"
 COOKIE_NAME = "__Host-mrtcloud_token"
@@ -41,18 +40,20 @@ JS_RENDER = """async (sitekey) => {
     document.head.appendChild(s);
   });
   await load();
+  window.__tsState = 'rendering';
   return await new Promise((resolve) => {
     const box = document.createElement('div');
+    box.id = 'tsbox';
     box.style.cssText = 'position:fixed;left:20px;top:20px;z-index:2147483647;background:#fff;padding:10px';
     document.body.appendChild(box);
-    const t = setTimeout(() => resolve({err: 'timeout-90s'}), 90000);
+    const t = setTimeout(() => { window.__tsState = 'timeout'; resolve({state: 'timeout-90s'}); }, 90000);
     window.turnstile.render(box, {
       sitekey: sitekey,
       action: 'renew',
       theme: 'light',
-      callback: (tok) => { clearTimeout(t); window.__tsToken = tok; resolve({ok: true, len: tok.length, head: tok.slice(0, 10)}); },
-      'error-callback': (e) => { clearTimeout(t); resolve({err: 'error-callback ' + String(e)}); },
-      'expired-callback': () => {},
+      callback: (tok) => { clearTimeout(t); window.__tsToken = tok; resolve({state: 'ok', len: tok.length}); },
+      'error-callback': (e) => { clearTimeout(t); window.__tsState = 'error:' + String(e); resolve({state: 'error', detail: String(e)}); },
+      'expired-callback': () => { window.__tsState = 'expired'; },
     });
   });
 }"""
@@ -71,47 +72,56 @@ def log(*a):
     print(*a, flush=True)
 
 
+def frame_text(page):
+    out = []
+    for f in page.frames:
+        if "challenges.cloudflare.com" in (f.url or ""):
+            try:
+                out.append(f.inner_text("body")[:200].replace("\n", " | "))
+            except Exception as e:  # noqa: BLE001
+                out.append("<read fail %s>" % str(e)[:60])
+    return out
+
+
 def main():
     if not TOKEN:
         log("[!] 缺少 MWS_TOKEN")
         return 2
     headless = os.environ.get("PROBE_HEADLESS", "0") == "1"
+    log("[i] engine:", ENGINE, "headless:", headless)
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
+        launch_kw = dict(headless=headless, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox", "--disable-dev-shm-usage", "--lang=ja-JP",
+        ])
+        try:
+            browser = p.chromium.launch(channel="chrome", **launch_kw)
+            log("[i] 用系统 Chrome（channel=chrome）")
+        except Exception as e:  # noqa: BLE001
+            log("[i] 系统 Chrome 不可用，退回捆绑 chromium:", str(e)[:120])
+            browser = p.chromium.launch(**launch_kw)
+
         ctx = browser.new_context(
-            user_agent=UA,
-            locale="ja-JP",
-            timezone_id="Asia/Tokyo",
+            user_agent=UA, locale="ja-JP", timezone_id="Asia/Tokyo",
             viewport={"width": 1366, "height": 900},
-        )
-        ctx.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            extra_http_headers={"Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8"},
         )
         ctx.add_cookies([{
             "name": COOKIE_NAME, "value": TOKEN, "domain": "cloud.m-ws.cc",
             "path": "/", "secure": True, "httpOnly": True, "sameSite": "Lax",
         }])
         page = ctx.new_page()
-        page.on("console", lambda m: log("   [console]", m.type, m.text[:200]))
-
-        log("[i] 打开面板…")
-        page.goto(FRONTEND + "/dashboard", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(4)
-        log("[i] url:", page.url, "| title:", page.title()[:80])
+        log("[i] 打开面板首页…")
+        page.goto(FRONTEND + "/", wait_until="domcontentloaded", timeout=60000)
+        time.sleep(5)
+        log("[i] url:", page.url, "| title:", page.title()[:60])
 
         me = page.evaluate(JS_ME)
-        log("[i] /api/auth/me ->", {k: (v if k != "key" else (v[:12] + "…" if v else "")) for k, v in me.items()})
+        log("[i] /api/auth/me ->", {k: (v if k != "key" else (v[:14] + "…" if v else "")) for k, v in me.items()})
         sitekey = me.get("key") or ""
         if not sitekey:
-            log("[!] 没拿到 turnstile_site_key")
-            page.screenshot(path="probe.png", full_page=False)
+            page.screenshot(path="probe.png")
             browser.close()
             return 1
 
@@ -119,32 +129,32 @@ def main():
         res = page.evaluate(JS_RENDER, sitekey)
         log("[i] render ->", res)
 
-        if not res.get("ok"):
-            # 交互式挑战：尝试点 iframe 里的复选框
-            for attempt in range(6):
+        tok = page.evaluate("() => window.__tsToken || ''")
+        if not tok:
+            # 交互式挑战：在页面坐标上真点一次复选框
+            for i in range(8):
                 time.sleep(3)
                 tok = page.evaluate("() => window.__tsToken || ''")
                 if tok:
-                    res = {"ok": True, "len": len(tok), "head": tok[:10]}
                     break
-                frames = [f for f in page.frames if "challenges.cloudflare.com" in (f.url or "")]
-                log("   [i] 第%d次尝试，turnstile frames: %d" % (attempt + 1, len(frames)))
-                for f in frames:
-                    try:
-                        box = f.locator("body").bounding_box()
-                        log("     frame url:", f.url[:90], "box:", box)
-                        f.locator("body").click(position={"x": 30, "y": 30}, timeout=5000)
-                    except Exception as e:
-                        log("     点击失败:", str(e)[:120])
-            page.screenshot(path="probe.png")
+                box = None
+                try:
+                    box = page.locator("#tsbox iframe").first.bounding_box()
+                except Exception:  # noqa: BLE001
+                    pass
+                log("   [i] 第%d轮 state=%s frame_text=%s box=%s" % (
+                    i + 1, page.evaluate("() => window.__tsState || ''"), frame_text(page), box))
+                if box and i in (0, 3):
+                    page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
 
-        if not res.get("ok"):
-            log("[✗] 未拿到 turnstile_token:", res)
+        page.screenshot(path="probe.png")
+        tok = page.evaluate("() => window.__tsToken || ''")
+        if not tok:
+            log("[✗] 未拿到 turnstile_token; state=", page.evaluate("() => window.__tsState || ''"))
+            log("    frame_text:", frame_text(page))
             browser.close()
             return 1
 
-        tok = page.evaluate("() => window.__tsToken")
-        page.screenshot(path="probe.png")
         log("[✓] 拿到 turnstile_token，长度", len(tok))
         out = page.evaluate(JS_RENEW, [BOT_ID, tok])
         log("[i] POST /api/bots/%s/renew -> %s %s" % (BOT_ID, out["status"], out["body"][:300]))

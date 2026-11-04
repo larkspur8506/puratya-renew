@@ -20,8 +20,8 @@ jobs:
 
       - name: 🛠️ 安装 Playwright
         run: |
-          pip install playwright
-          python -m playwright install --with-deps chromium
+          pip install patchright playwright
+          python -m patchright install --with-deps chromium || python -m playwright install --with-deps chromium
 
       - name: 🔎 探测 Turnstile
         env:
