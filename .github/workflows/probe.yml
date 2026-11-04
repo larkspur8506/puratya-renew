@@ -1,0 +1,40 @@
+name: Turnstile Probe
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ⚙ 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 🛠️ 安装 Playwright
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: 🔎 探测 Turnstile
+        env:
+          MWS_TOKEN: ${{ secrets.MWS_TOKEN }}
+          MWS_BOT_ID: '11973'
+          PROBE_HEADLESS: '0'
+          TZ: Asia/Shanghai
+        run: xvfb-run -a python3 captcha_probe.py
+
+      - name: 📷 上传截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-screenshot
+          path: probe.png
+          if-no-files-found: ignore
