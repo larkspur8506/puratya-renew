@@ -89,8 +89,8 @@ def _p(*a):
     print(*a, flush=True)
 
 
-def _remaining(token, bot_id, proxy=None):
-    """读 /api/bots，返回该 bot 的 timer.remaining_hours（拿不到返回 None）。"""
+def _bot_timer(token, bot_id, proxy=None):
+    """读 /api/bots，返回该 bot 的 timer dict（含 remaining_hours / last_renewed_at）。"""
     headers = {"User-Agent": UA, "Accept": "application/json",
                "Cookie": "{}={}".format(COOKIE_NAME, token),
                "Authorization": "Bearer " + token}
@@ -104,10 +104,14 @@ def _remaining(token, bot_id, proxy=None):
         lst = data if isinstance(data, list) else (data.get("bots") or [])
         for obj in lst:
             if isinstance(obj, dict) and str(obj.get("id")) == str(bot_id):
-                return (obj.get("timer") or {}).get("remaining_hours")
+                return obj.get("timer") or {}
     except (requests.RequestException, ValueError):
-        return None
-    return None
+        return {}
+    return {}
+
+
+def _remaining(token, bot_id, proxy=None):
+    return _bot_timer(token, bot_id, proxy).get("remaining_hours")
 
 
 def _try_click_captcha(sb):
@@ -133,7 +137,8 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=False, 
     from seleniumbase import SB
 
     before = {bid: _remaining(token, bid, proxy) for bid in bot_ids}
-    _p("[i] 续期前剩余: {}".format(before))
+    before_at = {bid: _bot_timer(token, bid, proxy).get("last_renewed_at") for bid in bot_ids}
+    _p("[i] 续期前剩余: {} / last_renewed_at: {}".format(before, before_at))
     result = {bid: (False, "未尝试") for bid in bot_ids}
 
     with SB(uc=True, headless=headless, proxy=proxy, locale_code="ja",
@@ -188,15 +193,18 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=False, 
                 done.append(bid)
                 result[bid] = (True, "接口返回 200")
 
-        # 用接口核对剩余时间真的变长（7 天 → 大约 +168h）
+        # 用接口核对：last_renewed_at 变了，或剩余时间明显变长
         if done:
-            for _ in range(12):
-                time.sleep(10)
-                cur = {bid: _remaining(token, bid, proxy) for bid in bot_ids}
+            for _ in range(6):
+                time.sleep(5)
+                cur = {bid: _bot_timer(token, bid, proxy) for bid in bot_ids}
                 for bid in done:
-                    b, c = before.get(bid), cur.get(bid)
-                    if c is not None and b is not None and float(c) > float(b) + 12:
-                        result[bid] = (True, "剩余 {:.0f}h → {:.0f}h".format(float(b), float(c)))
+                    b_h, c_h = before.get(bid), cur[bid].get("remaining_hours")
+                    at = cur[bid].get("last_renewed_at")
+                    if at and at != before_at.get(bid):
+                        result[bid] = (True, "last_renewed_at {} → {}".format(before_at.get(bid), at))
+                    elif c_h is not None and b_h is not None and float(c_h) > float(b_h) + 12:
+                        result[bid] = (True, "剩余 {:.0f}h → {:.0f}h".format(float(b_h), float(c_h)))
                 if all(result[bid][0] for bid in done):
                     break
         sb.save_screenshot("web-renew-final.png")
