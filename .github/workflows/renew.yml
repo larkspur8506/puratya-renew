@@ -36,7 +36,7 @@ jobs:
         run: |
           set -e
           VER=1.11.15
-          curl -fsSL -o /tmp/sing-box.tgz \
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/sing-box.tgz \
             "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
           tar -xzf /tmp/sing-box.tgz -C /tmp
           sudo install -m 0755 /tmp/sing-box-${VER}-linux-amd64/sing-box /usr/local/bin/sing-box
