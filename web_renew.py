@@ -11,6 +11,10 @@
   5) 用 token POST /api/bots/{id}/renew，再读 /api/bots 确认 remaining_hours 真的变长
 
 对外入口：renew_bots_via_web(token, bot_ids, proxy=...)
+
+2026-11-15：MWS 整站加了边缘 CF 盾（对自动化浏览器触发，curl 看不到），UC 首次 open
+可能被挑战卡死后 quit driver —— 参照 skymc-renew 增加 challenge 探测 + uc_gui_click_captcha
++ 普通 open 兜底，浏览器段失败时换新会话整体重试一次。
 """
 
 import os
@@ -132,7 +136,82 @@ def _try_click_captcha(sb):
         return False
 
 
+# MWS 2026-11-15 起整站加了边缘 CF 盾（curl 静态 UA 看不到，只对自动化浏览器指纹触发）。
+# UC 自动过不去时按 skymc-renew 的成熟打法用 pyautogui 点复选框（xvfb 下可用）。
+CHALLENGE_MARKERS = (
+    "Verify you are human", "Just a moment", "Checking your browser",
+    "Attention Required", "Security Verification",
+    "しばらくお待ちください", "アクセスが確認されました", "cf-chl",
+)
+
+
+def _challenge_visible(sb):
+    try:
+        src = sb.get_page_source()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(m in src for m in CHALLENGE_MARKERS)
+
+
+def _handle_cloudflare(sb, max_retry=3):
+    if not _challenge_visible(sb):
+        return True
+    _p("[i] 检测到 Cloudflare 边缘挑战，uc_gui_click_captcha …")
+    try:
+        sb.save_screenshot("web-renew-challenge.png")
+    except Exception:  # noqa: BLE001
+        pass
+    for i in range(max_retry):
+        try:
+            sb.uc_gui_click_captcha()
+            time.sleep(5)
+            if not _challenge_visible(sb):
+                _p("[✓] 边缘挑战已通过（第 {} 次）".format(i + 1))
+                return True
+        except Exception as e:  # noqa: BLE001
+            _p("[!] uc_gui_click_captcha 异常:", str(e)[:150])
+        time.sleep(2)
+    _p("[!] 边缘挑战 {} 次尝试未通过".format(max_retry))
+    return False
+
+
+def _wait_challenge_gone(sb, timeout=20):
+    end = time.time() + timeout
+    while time.time() < end:
+        if not _challenge_visible(sb):
+            return True
+        _handle_cloudflare(sb, max_retry=1)
+        time.sleep(1)
+    return not _challenge_visible(sb)
+
+
+def _open_front(sb, reconnect_time):
+    try:
+        sb.uc_open_with_reconnect(FRONTEND + "/", reconnect_time=reconnect_time)
+    except Exception as e:  # noqa: BLE001
+        _p("[!] uc_open_with_reconnect 异常，退回普通 open:", str(e)[:120])
+        try:
+            sb.open(FRONTEND + "/")
+        except Exception as e2:  # noqa: BLE001
+            raise RuntimeError("browser session dead: {}".format(str(e2)[:120])) from e2
+    _handle_cloudflare(sb)
+
+
 def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=False, bot_name=None):
+    """返回 {bot_id: (ok, detail)}。边缘 CF 盾可能打死 UC 会话，整段流程换新浏览器重试一次。"""
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            return _web_renew_once(token, bot_ids, proxy=proxy, timeout=timeout,
+                                   headless=headless, bot_name=bot_name)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            _p("[!] 网页续期异常（第 {} 次）:".format(attempt), str(e)[:200])
+    return {bid: (False, "浏览器流程两次尝试均失败: {}".format(str(last_err)[:120]))
+            for bid in bot_ids}
+
+
+def _web_renew_once(token, bot_ids, proxy=None, timeout=180, headless=False, bot_name=None):
     """返回 {bot_id: (ok, detail)}。"""
     from seleniumbase import SB
 
@@ -144,7 +223,7 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=False, 
     with SB(uc=True, headless=headless, proxy=proxy, locale_code="ja",
             ad_block_on=False, test=False, disable_csp=True) as sb:
         sb.driver.set_script_timeout(220)
-        sb.uc_open_with_reconnect(FRONTEND + "/", reconnect_time=4)
+        _open_front(sb, 4)
         try:
             sb.driver.execute_cdp_cmd("Network.setCookie", {
                 "name": COOKIE_NAME, "value": token, "url": FRONTEND + "/",
@@ -153,7 +232,8 @@ def renew_bots_via_web(token, bot_ids, proxy=None, timeout=180, headless=False, 
             _p("[i] cookie 已通过 CDP 写入")
         except Exception as e:  # noqa: BLE001
             _p("[!] 写 cookie 失败:", str(e)[:160])
-        sb.uc_open_with_reconnect(FRONTEND + "/", reconnect_time=3)
+        _open_front(sb, 3)
+        _wait_challenge_gone(sb)
         _p("[i] 当前页:", sb.get_current_url())
 
         me = sb.driver.execute_async_script(JS_ME)
