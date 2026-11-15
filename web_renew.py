@@ -232,8 +232,10 @@ def _web_renew_once(token, bot_ids, proxy=None, timeout=180, headless=False, bot
             _p("[i] cookie 已通过 CDP 写入")
         except Exception as e:  # noqa: BLE001
             _p("[!] 写 cookie 失败:", str(e)[:160])
-        _open_front(sb, 3)
-        _wait_challenge_gone(sb)
+        # 2026-11-15：不再二次导航重载页面。CDP 写 cookie 后当前页就是同源，
+        # credentials:'include' 的 fetch 立即携带新 cookie；实测二次 open 会触发
+        # MWS 新加的边缘 CF 盾并把 UC 会话打死（uc_open 重试耗尽 quit driver，
+        # 兜底 open / uc_gui_click_captcha 都来不及跑）。
         _p("[i] 当前页:", sb.get_current_url())
 
         me = sb.driver.execute_async_script(JS_ME)
